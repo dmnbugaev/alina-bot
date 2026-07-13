@@ -25,6 +25,7 @@ class SupabaseService:
             .select("*")
             .eq("telegram_id", telegram_id)
             .eq("status", "succeeded")
+            .eq("invite_sent", False)
             .order("created_at", desc=True)
             .limit(1)
             .execute()
@@ -33,6 +34,21 @@ class SupabaseService:
 
     async def get_succeeded_payment_by_user_async(self, telegram_id: int) -> dict[str, Any] | None:
         return await to_thread(self.get_succeeded_payment_by_user, telegram_id)
+
+    def get_any_succeeded_payment_by_user(self, telegram_id: int) -> dict[str, Any] | None:
+        response = (
+            self.client.table(self.table_name)
+            .select("*")
+            .eq("telegram_id", telegram_id)
+            .eq("status", "succeeded")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return response.data[0] if response.data else None
+
+    async def get_any_succeeded_payment_by_user_async(self, telegram_id: int) -> dict[str, Any] | None:
+        return await to_thread(self.get_any_succeeded_payment_by_user, telegram_id)
 
     def get_latest_pending_payment_by_user(self, telegram_id: int) -> dict[str, Any] | None:
         response = (
@@ -57,6 +73,8 @@ class SupabaseService:
         }
         response = self.client.table(self.table_name).insert(payload).execute()
         logger.info("Saved pending payment %s for telegram_id=%s", payment_id, telegram_id)
+        if not response.data:
+            raise RuntimeError(f"Supabase did not return inserted payment {payment_id}")
         return response.data[0]
 
     async def create_pending_payment_async(self, telegram_id: int, payment_id: str) -> dict[str, Any]:

@@ -28,6 +28,14 @@ async def send_invite_link(
         await supabase.set_invite_sent_async(payment_id)
 
 
+async def answer_if_invite_already_sent(callback: CallbackQuery, supabase: SupabaseService) -> bool:
+    sent_payment = await supabase.get_any_succeeded_payment_by_user_async(callback.from_user.id)
+    if sent_payment and sent_payment.get("invite_sent"):
+        await callback.message.answer("Ссылка уже была отправлена. Если она не сработала, напишите: @a_vng")
+        return True
+    return False
+
+
 @router.callback_query(lambda callback: callback.data == "get_access")
 async def get_access(callback: CallbackQuery) -> None:
     await callback.answer()
@@ -42,6 +50,9 @@ async def get_access(callback: CallbackQuery) -> None:
         paid_payment = await supabase.get_succeeded_payment_by_user_async(telegram_id)
         if paid_payment:
             await send_invite_link(callback, telegram, supabase, paid_payment["payment_id"])
+            return
+
+        if await answer_if_invite_already_sent(callback, supabase):
             return
 
         payment_id, payment_url = await yookassa.create_payment_async(telegram_id)
@@ -73,6 +84,9 @@ async def check_payment(callback: CallbackQuery) -> None:
         paid_payment = await supabase.get_succeeded_payment_by_user_async(telegram_id)
         if paid_payment:
             await send_invite_link(callback, telegram, supabase, paid_payment["payment_id"])
+            return
+
+        if await answer_if_invite_already_sent(callback, supabase):
             return
 
         pending_payment = await supabase.get_latest_pending_payment_by_user_async(telegram_id)

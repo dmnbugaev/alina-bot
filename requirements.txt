@@ -3,5 +3,5 @@ fastapi>=0.117,<1.0
 python-dotenv>=1.0,<2.0
 pydantic-settings>=2.3,<3.0
 supabase>=2.4,<3.0
-uvicorn[standard]>=0.35,<1.0
+uvicorn[standard]>=0.33,<1.0
 yookassa>=3.3,<4.0
