@@ -1,6 +1,9 @@
 import logging
 from asyncio import to_thread
-from uuid import uuid4
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
 
 from yookassa import Configuration, Payment
 
@@ -9,17 +12,44 @@ from bot.config import Settings
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class PaymentSnapshot:
+    payment_id: str
+    status: str
+    paid: bool
+    amount: Decimal
+    currency: str
+    metadata: dict[str, Any]
+    confirmation_url: str | None = None
+    expires_at: datetime | str | None = None
+
+
 class YooKassaService:
     def __init__(self, settings: Settings):
         self.settings = settings
         Configuration.account_id = settings.yookassa_shop_id
         Configuration.secret_key = settings.yookassa_secret_key
 
-    def create_payment(self, telegram_id: int) -> tuple[str, str]:
+    @staticmethod
+    def _to_snapshot(payment: Any) -> PaymentSnapshot:
+        confirmation = getattr(payment, "confirmation", None)
+        metadata = getattr(payment, "metadata", None) or {}
+        return PaymentSnapshot(
+            payment_id=str(payment.id),
+            status=str(getattr(payment, "status", "unknown")),
+            paid=bool(getattr(payment, "paid", False)),
+            amount=Decimal(str(payment.amount.value)),
+            currency=str(payment.amount.currency).upper(),
+            metadata=dict(metadata),
+            confirmation_url=getattr(confirmation, "confirmation_url", None),
+            expires_at=getattr(payment, "expires_at", None),
+        )
+
+    def create_payment(self, telegram_id: int, idempotency_key: str) -> PaymentSnapshot:
         payment = Payment.create(
             {
                 "amount": {
-                    "value": self.settings.payment_amount,
+                    "value": f"{self.settings.payment_amount:.2f}",
                     "currency": self.settings.payment_currency,
                 },
                 "confirmation": {
@@ -30,16 +60,20 @@ class YooKassaService:
                 "description": self.settings.payment_description,
                 "metadata": {"telegram_id": str(telegram_id)},
             },
-            str(uuid4()),
+            idempotency_key,
         )
         logger.info("Created YooKassa payment %s for telegram_id=%s", payment.id, telegram_id)
-        return payment.id, payment.confirmation.confirmation_url
+        return self._to_snapshot(payment)
 
-    async def create_payment_async(self, telegram_id: int) -> tuple[str, str]:
-        return await to_thread(self.create_payment, telegram_id)
+    async def create_payment_async(
+        self,
+        telegram_id: int,
+        idempotency_key: str,
+    ) -> PaymentSnapshot:
+        return await to_thread(self.create_payment, telegram_id, idempotency_key)
 
-    def get_payment(self, payment_id: str):
-        return Payment.find_one(payment_id)
+    def get_payment(self, payment_id: str) -> PaymentSnapshot:
+        return self._to_snapshot(Payment.find_one(payment_id))
 
-    async def get_payment_async(self, payment_id: str):
+    async def get_payment_async(self, payment_id: str) -> PaymentSnapshot:
         return await to_thread(self.get_payment, payment_id)

@@ -5,120 +5,145 @@ from aiogram.types import CallbackQuery
 
 from bot.config import get_settings
 from bot.keyboards.inline import payment_keyboard
-from bot.services.factory import get_supabase_service, get_yookassa_service
-from bot.services.supabase_service import SupabaseService
-from bot.services.telegram_service import InviteLinkError, TelegramService
+from bot.services.factory import (
+    get_payment_orchestrator,
+    get_supabase_service,
+)
+from bot.services.telegram_service import TelegramService
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 
-async def send_invite_link(
+async def answer_existing_access(
     callback: CallbackQuery,
     telegram: TelegramService,
-    supabase: SupabaseService,
-    payment_id: str | None = None,
-) -> None:
-    invite_link = await telegram.create_one_time_invite_link()
-    await callback.message.answer(
-        "Оплата прошла успешно.\n\nВаша одноразовая ссылка:\n"
-        f"{invite_link}"
+) -> bool:
+    delivery = await get_supabase_service().get_access_delivery_by_user_async(
+        callback.from_user.id,
     )
-    if payment_id:
-        await supabase.set_invite_sent_async(payment_id)
-
-
-async def answer_if_invite_already_sent(callback: CallbackQuery, supabase: SupabaseService) -> bool:
-    sent_payment = await supabase.get_any_succeeded_payment_by_user_async(callback.from_user.id)
-    if sent_payment and sent_payment.get("invite_sent"):
-        await callback.message.answer("Ссылка уже была отправлена. Если она не сработала, напишите: @a_vng")
+    if not delivery or delivery.get("status") != "delivered":
+        return False
+    if not callback.message:
         return True
-    return False
+    if await telegram.is_channel_member(callback.from_user.id):
+        await callback.message.answer("У вас уже есть доступ к закрытому каналу.")
+    else:
+        await callback.message.answer(
+            "Доступ уже выдавался. Для повторного входа напишите: "
+            f"{get_settings().support_username}",
+        )
+    return True
 
 
 @router.callback_query(lambda callback: callback.data == "get_access")
 async def get_access(callback: CallbackQuery) -> None:
     await callback.answer()
+    if not callback.message:
+        return
     settings = get_settings()
     supabase = get_supabase_service()
-    yookassa = get_yookassa_service()
+    orchestrator = get_payment_orchestrator()
     telegram = TelegramService(callback.bot, settings)
-
     telegram_id = callback.from_user.id
 
     try:
-        paid_payment = await supabase.get_succeeded_payment_by_user_async(telegram_id)
-        if paid_payment:
-            await send_invite_link(callback, telegram, supabase, paid_payment["payment_id"])
+        if await answer_existing_access(callback, telegram):
             return
-
-        if await answer_if_invite_already_sent(callback, supabase):
-            return
-
-        payment_id, payment_url = await yookassa.create_payment_async(telegram_id)
-        await supabase.create_pending_payment_async(telegram_id, payment_id)
-        await callback.message.answer(
-            "Перейдите по ссылке для оплаты:\n"
-            f"{payment_url}\n\n"
-            "После оплаты вернитесь в бот и нажмите «Проверить оплату».",
-            reply_markup=payment_keyboard(payment_url),
+        source = "organic"
+        try:
+            source = await supabase.get_user_source_async(telegram_id)
+            await supabase.record_event_async(
+                telegram_id,
+                "buy_clicked",
+                source,
+            )
+        except Exception:
+            logger.exception("Failed to record buy click analytics")
+        latest_payment = await supabase.get_latest_payment_by_user_async(
+            telegram_id,
         )
-    except InviteLinkError:
-        logger.exception("Payment found but invite link creation failed for telegram_id=%s", telegram_id)
+        if latest_payment and latest_payment.get("status") == "succeeded":
+            result = await orchestrator.sync_payment(latest_payment, telegram)
+            if result.status != "delivered":
+                await callback.message.answer(
+                    "Оплата найдена, но доступ пока не удалось отправить. "
+                    f"Бот повторит попытку автоматически. Поддержка: {settings.support_username}",
+                )
+            return
+        payment = await orchestrator.get_or_create_checkout(
+            telegram_id,
+            source,
+        )
+        payment_url = payment.get("confirmation_url")
+        if not payment_url:
+            raise RuntimeError("YooKassa did not return a confirmation URL")
         await callback.message.answer(
-            "Оплата найдена, но бот не смог создать ссылку в канал. Напишите: @a_vng"
+            "Ссылка на оплату готова.\n\n"
+            "После оплаты ничего нажимать не обязательно — бот проверит платёж "
+            "и обычно пришлёт доступ в течение двух минут.\n\n"
+            "Кнопка «Проверить оплату» остаётся доступна на случай задержки.",
+            reply_markup=payment_keyboard(str(payment_url)),
         )
     except Exception:
-        logger.exception("Failed to process access request for telegram_id=%s", telegram_id)
+        logger.exception(
+            "Failed to process access request for telegram_id=%s",
+            telegram_id,
+        )
         await callback.message.answer(
-            "Не удалось создать оплату. Попробуйте позже или напишите: @a_vng"
+            "Не удалось подготовить оплату. Попробуйте позже или напишите: "
+            f"{settings.support_username}",
         )
 
 
 @router.callback_query(lambda callback: callback.data == "check_payment")
 async def check_payment(callback: CallbackQuery) -> None:
     await callback.answer()
+    if not callback.message:
+        return
     settings = get_settings()
     supabase = get_supabase_service()
-    yookassa = get_yookassa_service()
+    orchestrator = get_payment_orchestrator()
     telegram = TelegramService(callback.bot, settings)
-
     telegram_id = callback.from_user.id
 
     try:
-        paid_payment = await supabase.get_succeeded_payment_by_user_async(telegram_id)
-        if paid_payment:
-            await send_invite_link(callback, telegram, supabase, paid_payment["payment_id"])
+        if await answer_existing_access(callback, telegram):
             return
-
-        if await answer_if_invite_already_sent(callback, supabase):
-            return
-
-        pending_payment = await supabase.get_latest_pending_payment_by_user_async(telegram_id)
-        if not pending_payment:
+        payment = await supabase.get_latest_payment_by_user_async(telegram_id)
+        if not payment:
             await callback.message.answer(
-                "У вас нет ожидающего платежа. Нажмите «Получить доступ»."
+                "У вас нет ожидающего платежа. Нажмите «Получить доступ».",
+            )
+            return
+        if payment.get("status") == "canceled":
+            await callback.message.answer(
+                "Предыдущая ссылка на оплату больше не активна. "
+                "Нажмите «Получить доступ», чтобы создать новую.",
             )
             return
 
-        payment_id = pending_payment["payment_id"]
-        payment = await yookassa.get_payment_async(payment_id)
-        if getattr(payment, "status", None) != "succeeded":
+        result = await orchestrator.sync_payment(payment, telegram)
+        if result.status == "pending":
             await callback.message.answer(
                 "Оплата пока не найдена. Если вы уже оплатили, подождите немного "
-                "и нажмите «Проверить оплату» еще раз."
+                "и попробуйте ещё раз.",
             )
-            return
-
-        await supabase.mark_payment_succeeded_async(payment_id)
-        await send_invite_link(callback, telegram, supabase, payment_id)
-    except InviteLinkError:
-        logger.exception("Payment found but invite link creation failed for telegram_id=%s", telegram_id)
-        await callback.message.answer(
-            "Оплата найдена, но бот не смог создать ссылку в канал. Напишите: @a_vng"
-        )
+        elif result.status == "canceled":
+            await callback.message.answer(
+                "Платёж отменён или истёк. Нажмите «Получить доступ», чтобы создать новый.",
+            )
+        elif result.status == "succeeded":
+            await callback.message.answer(
+                "Оплата найдена, но доступ пока не удалось отправить. "
+                f"Бот повторит попытку автоматически. Поддержка: {settings.support_username}",
+            )
     except Exception:
-        logger.exception("Failed to check payment for telegram_id=%s", telegram_id)
+        logger.exception(
+            "Failed to check payment for telegram_id=%s",
+            telegram_id,
+        )
         await callback.message.answer(
-            "Не удалось проверить оплату. Попробуйте позже или напишите: @a_vng"
+            "Не удалось проверить оплату. Попробуйте позже или напишите: "
+            f"{settings.support_username}",
         )

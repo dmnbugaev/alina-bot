@@ -2,7 +2,7 @@ import logging
 
 from aiogram import Dispatcher
 
-from bot.handlers import payment, start
+from bot.handlers import admin, payment, start
 
 
 def setup_logging() -> None:
@@ -16,4 +16,5 @@ def create_dispatcher() -> Dispatcher:
     dp = Dispatcher()
     dp.include_router(start.router)
     dp.include_router(payment.router)
+    dp.include_router(admin.router)
     return dp

@@ -1,7 +1,9 @@
 # Alina private Telegram bot
 
-Telegram-бот продает единоразовый доступ в приватный канал через YooKassa.
-После оплаты пользователь возвращается в бот, нажимает «Проверить оплату», бот проверяет платеж, сохраняет статус в Supabase и выдает одноразовую invite-ссылку.
+Telegram-бот продаёт разовый доступ в приватный канал через YooKassa.
+Платёж автоматически проверяется фоновым worker на VPS. После подтверждения бот выдаёт
+персональную одноразовую invite-ссылку на 24 часа. Ручная кнопка проверки остаётся
+резервным сценарием.
 
 ## Стек
 
@@ -33,6 +35,16 @@ PAYMENT_CURRENCY=RUB
 PAYMENT_DESCRIPTION=Единоразовый доступ в приватный Telegram-канал
 
 TELEGRAM_WEBHOOK_SECRET=
+
+AUTO_FULFILLMENT_ENABLED=false
+REMINDERS_ENABLED=false
+PAYMENT_POLL_INTERVAL_SECONDS=30
+PAYMENT_POLL_BATCH_SIZE=20
+INVITE_TTL_HOURS=24
+REMINDER_DELAYS_HOURS=1,24
+
+SUPPORT_USERNAME=@a_vng
+ADMIN_TELEGRAM_IDS=123456789
 ```
 
 Важно:
@@ -41,16 +53,20 @@ TELEGRAM_WEBHOOK_SECRET=
 - `CHANNEL_ID` должен быть id приватного канала, обычно формата `-100...`.
 - Бот должен быть администратором канала и иметь право создавать invite-ссылки.
 - `YOOKASSA_RETURN_URL` обычно равен ссылке на бота, например `https://t.me/your_bot_username`.
-- `SUPABASE_SERVICE_ROLE_KEY` храните только на сервере.
+- `SUPABASE_SERVICE_ROLE_KEY` обязателен и хранится только на сервере. Anon key не
+  используется для операций с платежами.
 - Для VPS polling-деплоя `TELEGRAM_WEBHOOK_SECRET` можно оставить пустым.
+- `ADMIN_TELEGRAM_IDS` — числовые Telegram ID администраторов через запятую.
+- Автовыдача и напоминания выключены по умолчанию для безопасного production-роллаута.
 
 ## Supabase
 
-1. Откройте Supabase project.
-2. Перейдите в SQL Editor.
-3. Выполните файл `supabase/schema.sql`.
-4. Повторный запуск безопасен: `create table if not exists` и `create index if not exists` не удаляют данные.
-5. Если включен RLS, используйте `SUPABASE_SERVICE_ROLE_KEY` на сервере или настройте policies для `select`, `insert`, `update` таблицы `payments`.
+1. Сделайте резервную копию production-базы.
+2. Для нового проекта сначала выполните `supabase/schema.sql`.
+3. Затем выполните `supabase/migrations/20260829_reliability.sql`.
+4. Миграция сохраняет старые платежи, переносит состояние выдачи доступа и включает RLS.
+5. Перед включением автоматизации проверьте, что сервер использует именно
+   `SUPABASE_SERVICE_ROLE_KEY`.
 
 Проверка подключения:
 
@@ -67,6 +83,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
@@ -82,7 +99,38 @@ python scripts/check_telegram.py
 python -m bot.main
 ```
 
-Polling и webhook нельзя использовать одновременно на одном токене. Перед запуском polling бот удаляет webhook через `delete_webhook`.
+Polling и Telegram webhook нельзя использовать одновременно на одном токене. При запуске
+polling бот отключает webhook, но сохраняет накопившиеся Telegram updates.
+
+Проверки перед коммитом:
+
+```bash
+ruff check .
+ruff format --check .
+coverage run -m pytest
+coverage report --fail-under=40
+```
+
+## Администрирование
+
+Команды доступны только пользователям из `ADMIN_TELEGRAM_IDS`:
+
+- `/stats` — воронка, выручка и незавершённые платежи за 24 часа, 7 и 30 дней;
+- `/errors` — последние нерешённые ошибки выдачи;
+- `/health` — Supabase, worker, флаги и последняя ошибка.
+
+## Безопасный rollout
+
+1. Оставьте `AUTO_FULFILLMENT_ENABLED=false` и `REMINDERS_ENABLED=false`.
+2. Примените миграцию Supabase, обновите код и перезапустите systemd.
+3. Выполните один контролируемый реальный платёж и проверьте ручную кнопку.
+4. Включите `AUTO_FULFILLMENT_ENABLED=true`, перезапустите сервис и проверьте
+   автоматическую выдачу.
+5. Соберите семь дней базовой статистики.
+6. Включите `REMINDERS_ENABLED=true`; сравните следующие 14 дней с базовым периодом.
+
+Перед rollout также проверьте в кабинете YooKassa, что по последнему успешному платежу
+сформирован фискальный чек.
 
 ## Деплой на VPS через `/var/www`
 
@@ -216,11 +264,16 @@ sudo systemctl status alina-telegram-bot
 - В логах нет ошибок `Unauthorized`, `Forbidden`, `ValidationError`.
 - Команда `/start` в Telegram отвечает.
 - Бот является администратором приватного канала.
-- После оплаты кнопка «Проверить оплату» выдает invite-ссылку.
+- Повторные нажатия не создают несколько платежей.
+- После оплаты worker автоматически выдаёт invite-ссылку не позднее двух минут.
+- Invite-ссылка принимает одного участника и истекает через 24 часа.
+- `/health`, `/stats` и `/errors` доступны администратору.
 
 ## Webhook / Vercel
 
-В проекте также есть `api/webhook.py` и `vercel.json`, но для VPS через `/var/www` используйте polling-режим из инструкции выше. Не запускайте polling и webhook одновременно на одном токене.
+В проекте сохранены legacy-файлы `api/webhook.py` и `vercel.json`. Production-сценарий
+этого проекта — VPS polling; Vercel не используется для уведомлений YooKassa.
+Не запускайте polling и Telegram webhook одновременно на одном токене.
 
 Для настройки webhook:
 
@@ -240,4 +293,5 @@ python -m bot.main
 - Не храните реальные токены в репозитории.
 - Не публикуйте `.env`.
 - Перевыпустите токены, если они попадали в публичный репозиторий или чат.
-- На сервере используйте `SUPABASE_SERVICE_ROLE_KEY`, если в Supabase включен RLS.
+- На сервере всегда используйте `SUPABASE_SERVICE_ROLE_KEY`; таблицы платежей, выдачи и
+  аналитики закрыты RLS от anon/authenticated ролей.
