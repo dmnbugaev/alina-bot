@@ -7,7 +7,7 @@ from bot.config import get_settings
 from bot.keyboards.inline import payment_keyboard
 from bot.services.factory import get_supabase_service, get_yookassa_service
 from bot.services.supabase_service import SupabaseService
-from bot.services.telegram_service import TelegramService
+from bot.services.telegram_service import InviteLinkError, TelegramService
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -63,6 +63,11 @@ async def get_access(callback: CallbackQuery) -> None:
             "После оплаты вернитесь в бот и нажмите «Проверить оплату».",
             reply_markup=payment_keyboard(payment_url),
         )
+    except InviteLinkError:
+        logger.exception("Payment found but invite link creation failed for telegram_id=%s", telegram_id)
+        await callback.message.answer(
+            "Оплата найдена, но бот не смог создать ссылку в канал. Напишите: @a_vng"
+        )
     except Exception:
         logger.exception("Failed to process access request for telegram_id=%s", telegram_id)
         await callback.message.answer(
@@ -107,6 +112,11 @@ async def check_payment(callback: CallbackQuery) -> None:
 
         await supabase.mark_payment_succeeded_async(payment_id)
         await send_invite_link(callback, telegram, supabase, payment_id)
+    except InviteLinkError:
+        logger.exception("Payment found but invite link creation failed for telegram_id=%s", telegram_id)
+        await callback.message.answer(
+            "Оплата найдена, но бот не смог создать ссылку в канал. Напишите: @a_vng"
+        )
     except Exception:
         logger.exception("Failed to check payment for telegram_id=%s", telegram_id)
         await callback.message.answer(
