@@ -33,6 +33,21 @@ class PaymentValidationError(RuntimeError):
     pass
 
 
+# Срок жизни ссылки на оплату YooKassa. Возраст платежа без provider_expires_at
+# (легаси-строки до миграции 20260829) сверх этого окна считается просроченным.
+MAX_CHECKOUT_AGE = timedelta(hours=1)
+
+
+def is_checkout_reusable(payment: dict[str, Any]) -> bool:
+    expires_at = parse_datetime(payment.get("provider_expires_at"))
+    if expires_at is not None:
+        return expires_at > datetime.now(UTC)
+    created_at = parse_datetime(payment.get("created_at"))
+    if created_at is None:
+        return False
+    return datetime.now(UTC) - created_at <= MAX_CHECKOUT_AGE
+
+
 class PaymentOrchestrator:
     def __init__(
         self,
@@ -88,14 +103,13 @@ class PaymentOrchestrator:
     ) -> dict[str, Any]:
         payment = await self.supabase.get_active_payment_async(telegram_id)
         if payment and payment.get("status") == "pending" and payment.get("confirmation_url"):
-            expires_at = parse_datetime(payment.get("provider_expires_at"))
-            if expires_at is None or expires_at > datetime.now(UTC):
+            if is_checkout_reusable(payment):
                 return payment
             await self.supabase.update_payment_status_async(
                 int(payment["id"]),
                 "canceled",
                 int(payment.get("check_attempts") or 0),
-                error="Provider payment expired before checkout reuse",
+                error="Checkout link expired or stale; recreating",
             )
             payment = None
 

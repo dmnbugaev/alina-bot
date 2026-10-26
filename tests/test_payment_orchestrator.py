@@ -17,6 +17,7 @@ class FakeSupabase:
         self.payment = None
         self.delivery = None
         self.events = []
+        self.status_updates = []
         self._lock = asyncio.Lock()
 
     async def get_active_payment_async(self, telegram_id):
@@ -83,6 +84,7 @@ class FakeSupabase:
         next_check_at=None,
         error=None,
     ):
+        self.status_updates.append((local_id, status, error))
         self.payment.update(
             {
                 "status": status,
@@ -190,6 +192,88 @@ async def test_repeated_callbacks_create_one_provider_payment():
 
     assert first["payment_id"] == second["payment_id"]
     assert yookassa.created_count == 1
+
+
+def make_pending_payment(**overrides):
+    payment = {
+        "id": 30,
+        "telegram_id": 42,
+        "payment_id": "old-pay",
+        "idempotency_key": "old-key",
+        "amount": "499.00",
+        "currency": "RUB",
+        "status": "pending",
+        "check_attempts": 3,
+        "confirmation_url": "https://yookassa.test/old",
+        "provider_expires_at": None,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    payment.update(overrides)
+    return payment
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_payment_without_expiry_is_canceled_and_recreated():
+    supabase = FakeSupabase()
+    supabase.payment = make_pending_payment(
+        created_at="2026-07-23T18:03:32+00:00",
+    )
+    yookassa = FakeYooKassa()
+    orchestrator = PaymentOrchestrator(make_settings(), supabase, yookassa)
+
+    payment = await orchestrator.get_or_create_checkout(42, "organic")
+
+    assert supabase.status_updates[0] == (
+        30,
+        "canceled",
+        "Checkout link expired or stale; recreating",
+    )
+    assert yookassa.created_count == 1
+    assert payment["payment_id"] == "pay-1"
+    assert payment["confirmation_url"] == "https://yookassa.test/pay"
+
+
+@pytest.mark.asyncio
+async def test_fresh_pending_payment_without_expiry_is_reused():
+    supabase = FakeSupabase()
+    supabase.payment = make_pending_payment()
+    yookassa = FakeYooKassa()
+    orchestrator = PaymentOrchestrator(make_settings(), supabase, yookassa)
+
+    payment = await orchestrator.get_or_create_checkout(42, "organic")
+
+    assert yookassa.created_count == 0
+    assert payment["payment_id"] == "old-pay"
+
+
+@pytest.mark.asyncio
+async def test_provider_expired_pending_payment_is_recreated():
+    supabase = FakeSupabase()
+    supabase.payment = make_pending_payment(
+        provider_expires_at="2026-07-23T19:03:32+00:00",
+    )
+    yookassa = FakeYooKassa()
+    orchestrator = PaymentOrchestrator(make_settings(), supabase, yookassa)
+
+    payment = await orchestrator.get_or_create_checkout(42, "organic")
+
+    assert yookassa.created_count == 1
+    assert payment["payment_id"] == "pay-1"
+
+
+@pytest.mark.asyncio
+async def test_provider_pending_payment_in_future_is_reused():
+    supabase = FakeSupabase()
+    supabase.payment = make_pending_payment(
+        provider_expires_at="2030-01-01T00:00:00+00:00",
+    )
+    yookassa = FakeYooKassa()
+    orchestrator = PaymentOrchestrator(make_settings(), supabase, yookassa)
+
+    payment = await orchestrator.get_or_create_checkout(42, "organic")
+
+    assert yookassa.created_count == 0
+    assert payment["payment_id"] == "old-pay"
 
 
 @pytest.mark.asyncio

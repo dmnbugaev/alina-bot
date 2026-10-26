@@ -1,7 +1,7 @@
 import logging
 from asyncio import to_thread
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -10,6 +10,10 @@ from yookassa import Configuration, Payment
 from bot.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# Явный срок жизни чекаута, чтобы payment_orchestrator мог переиспользовать
+# ссылку только пока она реально оплачиваема.
+CHECKOUT_TTL = timedelta(hours=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +50,7 @@ class YooKassaService:
         )
 
     def create_payment(self, telegram_id: int, idempotency_key: str) -> PaymentSnapshot:
+        expires_at = (datetime.now(UTC) + CHECKOUT_TTL).replace(microsecond=0).isoformat()
         payment = Payment.create(
             {
                 "amount": {
@@ -57,6 +62,7 @@ class YooKassaService:
                     "return_url": self.settings.yookassa_return_url,
                 },
                 "capture": True,
+                "expires_at": expires_at,
                 "description": self.settings.payment_description,
                 "metadata": {"telegram_id": str(telegram_id)},
             },

@@ -1,7 +1,7 @@
 import logging
 import re
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -61,3 +61,11 @@ async def contact_me(callback: CallbackQuery) -> None:
         await callback.message.answer(
             f"По всем вопросам: {settings.support_username}",
         )
+
+
+# Любой не-командный текст: раньше бот на такие сообщения просто молчал.
+@router.message(F.text, ~F.text.startswith("/"))
+async def unknown_text(message: Message) -> None:
+    await message.answer(
+        "Я бот закрытого канала Алины. Нажмите /start, чтобы получить доступ.",
+    )
