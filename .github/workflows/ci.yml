@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
@@ -19,3 +20,33 @@ jobs:
       - run: coverage run -m pytest
       # Initial production baseline; raise this threshold as integration tests grow.
       - run: coverage report --fail-under=40
+
+  deploy:
+    needs: quality
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to VPS
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+        run: |
+          install -m 600 /dev/null ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          : "${DEPLOY_HOST:=130.49.149.189}"
+          : "${DEPLOY_PORT:=22222}"
+          # У канала до VPS бывают таймауты при установке соединения — ретраим.
+          for attempt in 1 2 3 4 5; do
+            echo "deploy attempt $attempt"
+            ssh -i ~/.ssh/id_ed25519 \
+                -o IdentitiesOnly=yes \
+                -o StrictHostKeyChecking=accept-new \
+                -o ConnectTimeout=20 \
+                -p "$DEPLOY_PORT" "admin@$DEPLOY_HOST" 'bash -s' < scripts/deploy_remote.sh && exit 0
+            sleep 15
+          done
+          echo "deploy failed after 5 attempts"
+          exit 1

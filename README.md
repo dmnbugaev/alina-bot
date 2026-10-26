@@ -249,6 +249,13 @@ journalctl -u alina-telegram-bot -f
 
 ### 7. Обновление кода
 
+Обновление деплоится автоматически: push в `main` запускает `.github/workflows/ci.yml`
+(линтер, тесты, затем SSH-деплой на VPS через `scripts/deploy_remote.sh`).
+В репозитории нужен secret `DEPLOY_SSH_KEY` — приватный deploy-ключ для
+`admin@<VPS>:22222` (публичная часть добавлена в `~/.ssh/authorized_keys`).
+
+Ручное обновление, если CI недоступен:
+
 ```bash
 cd /var/www/alina-privat-telegram
 git pull
