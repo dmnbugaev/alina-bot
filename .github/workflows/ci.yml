@@ -34,6 +34,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
         run: |
+          mkdir -p ~/.ssh
           install -m 600 /dev/null ~/.ssh/id_ed25519
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           : "${DEPLOY_HOST:=130.49.149.189}"
